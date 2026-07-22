@@ -6,7 +6,8 @@
 //!
 //! Downsampling is controlled by [`WaveformOptions`], which selects the number of
 //! output points, how each bucket is summarized ([`Measure::Peak`] or
-//! [`Measure::Rms`]), and whether the result is normalized.
+//! [`Measure::Rms`]), how multiple channels are handled ([`ChannelMode`]), and
+//! whether the result is normalized.
 
 #[cfg(feature = "symphonia")]
 use std::fs::File;
@@ -41,6 +42,12 @@ pub enum Measure {
     Rms,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelMode {
+    Mix, //average all channels into one
+    Single(usize), //use only this channel, or the last if out of range
+}
+
 /// Controls how samples are downsampled into a waveform.
 ///
 /// Construct with [`WaveformOptions::new`] and adjust with the builder methods:
@@ -56,6 +63,7 @@ pub enum Measure {
 pub struct WaveformOptions {
     pub target_len: usize, //num of points
     pub measure: Measure,
+    pub channels: ChannelMode, //how channels are reduced to mono
     pub normalize: bool, //when true, largest point is 1.0
 }
 
@@ -64,12 +72,18 @@ impl WaveformOptions {
         Self {
             target_len,
             measure: Measure::Rms,
+            channels: ChannelMode::Mix,
             normalize: true,
         }
     }
 
     pub fn measure(mut self, measure: Measure) -> Self {
         self.measure = measure;
+        self
+    }
+
+    pub fn channels(mut self, channels: ChannelMode) -> Self {
+        self.channels = channels;
         self
     }
 
@@ -136,9 +150,8 @@ pub fn generate_from_source(
         .make_audio_decoder(&codec_params, &AudioDecoderOptions::default())
         .map_err(|e| e.to_string())?;
 
-    // Full-resolution mono samples. Buffered so the waveform resolution is bound by the
-    // audio content rather than by the codec's packet size.
-    let mut mono = Vec::new();
+    // full res
+    let mut mono = Vec::with_capacity(num_frames.unwrap_or(0) as usize);
     let mut interleaved: Vec<f32> = Vec::new();
     let mut total_frames = 0usize;
 
@@ -157,7 +170,7 @@ pub fn generate_from_source(
         match decoder.decode(&packet) {
             Ok(decoded) => {
                 total_frames += decoded.frames();
-                append_mono(&decoded, &mut interleaved, &mut mono);
+                append_samples(&decoded, &mut interleaved, &mut mono, options.channels);
             }
             // if malformed -> skip this one and keep deforming
             Err(Error::DecodeError(_) | Error::ResetRequired) => continue,
@@ -180,21 +193,36 @@ pub fn generate_from_source(
     Ok((waveform, calculated_duration))
 }
 
-/// Appends the mono downmix of a decoded buffer to `mono`.
+/// Appends the mono reduction of a decoded buffer to `out`.
 ///
-/// Any sample format is converted to `f32` in `[-1.0, 1.0]`, then channels are
-/// averaged per frame. `interleaved` is a reusable scratch buffer.
+/// Any sample format is converted to `f32` in `[-1.0, 1.0]`, then channels are reduced
+/// according to `channels`. `interleaved` is a reusable buffer.
 #[cfg(feature = "symphonia")]
-fn append_mono(buf: &GenericAudioBufferRef<'_>, interleaved: &mut Vec<f32>, mono: &mut Vec<f32>) {
-    let channels = buf.num_planes();
-    if channels == 0 {
+fn append_samples(
+    buf: &GenericAudioBufferRef<'_>,
+    interleaved: &mut Vec<f32>,
+    out: &mut Vec<f32>,
+    channels: ChannelMode,
+) {
+    let count = buf.num_planes();
+    if count == 0 {
         return;
     }
 
     buf.copy_to_vec_interleaved(interleaved);
-    for frame in interleaved.chunks_exact(channels) {
-        let sum: f32 = frame.iter().sum();
-        mono.push(sum / channels as f32);
+    match channels {
+        ChannelMode::Mix => {
+            for frame in interleaved.chunks_exact(count) {
+                let sum: f32 = frame.iter().sum();
+                out.push(sum / count as f32);
+            }
+        }
+        ChannelMode::Single(index) => {
+            let index = index.min(count - 1);
+            for frame in interleaved.chunks_exact(count) {
+                out.push(frame[index]);
+            }
+        }
     }
 }
 

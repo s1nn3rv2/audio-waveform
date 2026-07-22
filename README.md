@@ -2,7 +2,7 @@
 
 A utility library to generate visual waveform data from audio files.
 
-It decodes audio files using `symphonia` and produces a downsampled amplitude vector for rendering audio waveforms, along with the track's duration. Downsampling is configurable via `WaveformOptions`: choose the number of points, a peak or RMS summary per point, and whether to normalize. You may also exclude symphonia and use your own decoder.
+It decodes audio files using `symphonia` and produces a downsampled amplitude vector for rendering audio waveforms, along with the track's duration. Downsampling is configurable via `WaveformOptions`: choose the number of points, a peak or RMS summary per point, how channels are combined, and whether to normalize. You may also exclude symphonia and use your own decoder.
 
 ## Usage
 
@@ -97,6 +97,7 @@ fn main() {
 
 - `WaveformOptions::new(target_len)`: sets the number of output points. Defaults to an RMS summary with normalization.
 - `.measure(Measure::Peak)` / `.measure(Measure::Rms)`: choose a peak envelope or an RMS (loudness) summary per point.
+- `.channels(ChannelMode::Mix)` / `.channels(ChannelMode::Single(0))`: average all channels together, or use a single channel by index (out-of-range indices fall back to the last channel). Only affects the decoding functions; `generate_from_samples` already takes mono input.
 - `.normalize(false)`: keep raw amplitudes instead of scaling the largest point to `1.0` (useful for comparing loudness across files).
 
 ## Feature Gates
