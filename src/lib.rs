@@ -8,6 +8,7 @@
 //! output points, how each bucket is summarized ([`Measure::Peak`] or
 //! [`Measure::Rms`]), how multiple channels are handled ([`ChannelMode`]), and
 //! whether the result is normalized.
+#![doc = include_str!("../README.md")]
 
 #[cfg(feature = "symphonia")]
 use std::fs::File;

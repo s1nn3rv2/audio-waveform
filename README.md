@@ -53,7 +53,7 @@ fn main() {
 
 #### Decoding from Memory
 
-```rust
+```rust,no_run
 use std::io::Cursor;
 
 fn main() {
