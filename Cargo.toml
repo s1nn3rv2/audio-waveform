@@ -1,0 +1,17 @@
+[package]
+name = "audio-waveform"
+version = "1.0.0"
+edition = "2024"
+description = "A utility library to generate visual waveform data from audio files"
+license = "MIT"
+homepage = "https://github.com/s1nn3rv2/audio-waveform"
+repository = "https://github.com/s1nn3rv2/audio-waveform"
+readme = "README.md"
+
+[dependencies]
+symphonia = { version = "0.6", optional = true }
+
+[features]
+default = ["symphonia", "all"]
+symphonia = ["dep:symphonia"]
+all = ["symphonia/all"]
