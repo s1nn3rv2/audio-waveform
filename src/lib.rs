@@ -194,6 +194,103 @@ pub fn generate_from_source(
     Ok((waveform, calculated_duration))
 }
 
+/// Decodes an audio file at the given path and generates separate waveform vectors for each channel.
+///
+/// Returns a vector of waveform points for each audio channel (e.g. `[Left, Right]` for stereo or
+/// `[FL, FR, FC, LFE, RL, RR]` for 5.1 surround sound) in a single pass, along with duration in seconds.
+#[cfg(feature = "symphonia")]
+pub fn generate_channels(path: &Path, options: &WaveformOptions) -> Result<(Vec<Vec<f32>>, f64), String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let extension_hint = path.extension().map(|e| e.to_string_lossy());
+    generate_channels_from_source(Box::new(file), extension_hint.as_deref(), options)
+}
+
+/// Decodes audio directly from any source implementing `MediaSource` and generates separate waveform
+/// vectors for all audio channels in a single pass.
+///
+/// Returns a vector of waveform points for each audio channel and the duration in seconds.
+#[cfg(feature = "symphonia")]
+pub fn generate_channels_from_source(
+    source: Box<dyn MediaSource>,
+    extension_hint: Option<&str>,
+    options: &WaveformOptions,
+) -> Result<(Vec<Vec<f32>>, f64), String> {
+    let mss = MediaSourceStream::new(source, Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = extension_hint {
+        hint.with_extension(ext);
+    }
+
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let (track_id, codec_params, num_frames, time_base, duration) = format
+        .tracks()
+        .iter()
+        .find_map(|t| match t.codec_params {
+            Some(CodecParameters::Audio(ref params)) if params.codec != CODEC_ID_NULL_AUDIO => {
+                Some((t.id, params.clone(), t.num_frames, t.time_base, t.duration))
+            }
+            _ => None,
+        })
+        .ok_or("No audio track found")?;
+
+    let sample_rate = codec_params.sample_rate.unwrap_or(44100) as f64;
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&codec_params, &AudioDecoderOptions::default())
+        .map_err(|e| e.to_string())?;
+
+    let mut channel_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut interleaved: Vec<f32> = Vec::new();
+    let mut total_frames = 0usize;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            Err(Error::IoError(ref e)) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(_) => break,
+        };
+
+        if packet.track_id != track_id {
+            continue;
+        }
+
+        match decoder.decode(&packet) {
+            Ok(decoded) => {
+                total_frames += decoded.frames();
+                append_all_channel_samples(&decoded, &mut interleaved, &mut channel_buffers);
+            }
+            Err(Error::DecodeError(_) | Error::ResetRequired) => continue,
+            Err(_) => break,
+        }
+    }
+
+    let calculated_duration = if let (Some(tb), Some(dur)) = (time_base, duration) {
+        tb.calc_time(Timestamp::new(dur.get() as i64))
+            .map(|t| t.as_secs_f64())
+            .unwrap_or(0.0)
+    } else if let Some(frames) = num_frames {
+        frames as f64 / sample_rate
+    } else {
+        total_frames as f64 / sample_rate
+    };
+
+    let mut waveforms = Vec::with_capacity(channel_buffers.len());
+    for ch_samples in &channel_buffers {
+        waveforms.push(generate_from_samples(ch_samples, options));
+    }
+
+    Ok((waveforms, calculated_duration))
+}
+
 /// Appends the mono reduction of a decoded buffer to `out`.
 ///
 /// Any sample format is converted to `f32` in `[-1.0, 1.0]`, then channels are reduced
@@ -222,6 +319,32 @@ fn append_samples(
             let index = index.min(count - 1);
             for frame in interleaved.chunks_exact(count) {
                 out.push(frame[index]);
+            }
+        }
+    }
+}
+
+/// Appends de-interleaved channel samples to `out_channels`.
+#[cfg(feature = "symphonia")]
+fn append_all_channel_samples(
+    buf: &GenericAudioBufferRef<'_>,
+    interleaved: &mut Vec<f32>,
+    out_channels: &mut Vec<Vec<f32>>,
+) {
+    let count = buf.num_planes();
+    if count == 0 {
+        return;
+    }
+
+    if out_channels.is_empty() {
+        out_channels.resize(count, Vec::new());
+    }
+
+    buf.copy_to_vec_interleaved(interleaved);
+    for frame in interleaved.chunks_exact(count) {
+        for (c, &sample) in frame.iter().enumerate() {
+            if c < out_channels.len() {
+                out_channels[c].push(sample);
             }
         }
     }
