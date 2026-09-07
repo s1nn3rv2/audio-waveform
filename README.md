@@ -8,7 +8,7 @@ A utility library to generate visual waveform data from audio files.
 
 It decodes audio files using `symphonia` and produces a downsampled amplitude vector for rendering audio waveforms, along with the track's duration. Downsampling is configurable via `WaveformOptions`: choose the number of points, a peak or RMS summary per point, how channels are combined, and whether to normalize.
 
-Supports decoding from a file path, any in-memory reader, or raw pre-decoded samples. Multi-channel tracks (stereo, 5.1 surround) can be decoded into one waveform per channel in a single pass. You may also exclude `symphonia` and use your own decoder.
+Supports decoding from a file path, any in-memory reader, or raw pre-decoded samples. Multi-channel tracks (stereo, 5.1 surround) can be decoded into one waveform per channel in a single pass. Waveforms come out as `f32` points, or as `u8` points. You may also exclude `symphonia` and use your own decoder.
 
 > **Note**: To render the amplitude vectors this library produces into customized SVGs or raster images (PNG, JPEG, WebP, AVIF, BMP), see the crate [`audio-waveform-render`](https://crates.io/crates/audio-waveform-render).
 
@@ -120,6 +120,39 @@ fn main() {
 }
 ```
 
+#### Compact `u8` Waveforms
+
+Waveform points are `f32` by default. `generate_u8` returns the same waveform with each point scaled onto `0..=255`, where `0` is silence and `255` is full amplitude.
+
+```rust,no_run
+use audio_waveform::{generate_u8, WaveformOptions};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (waveform, duration) = generate_u8(Path::new("song.mp3"), &WaveformOptions::new(250))?;
+
+    println!("{} bytes covering {duration:.2}s", waveform.len());
+    Ok(())
+}
+```
+
+`generate_from_u8_samples` reduces a waveform you already have to fewer points, so a stored 1000-point waveform can become a 100-point preview without decoding the audio again.
+
+```rust
+use audio_waveform::{generate_from_u8_samples, Measure, WaveformOptions};
+
+fn main() {
+    let stored = vec![10, 40, 200, 90, 30, 60];
+    let options = WaveformOptions::new(3)
+        .measure(Measure::Peak)
+        .normalize(false);
+
+    assert_eq!(generate_from_u8_samples(&stored, &options), vec![40, 200, 60]);
+}
+```
+
+> **Note**: `generate_from_u8_samples` expects waveform points, not raw 8-bit PCM audio. Raw 8-bit PCM centres silence on `128` instead of `0`, so passing it here reads silence as half amplitude. Decode it with `generate_u8` instead.
+
 ### Options
 
 `WaveformOptions` controls downsampling:
@@ -173,7 +206,7 @@ symphonia = { version = "0.6", features = ["mp3", "wav"] }
 ```
 
 Available features:
-- `symphonia`: Enables the `symphonia` dependency and decoding APIs (`generate`, `generate_from_source`, `generate_channels`, and `generate_channels_from_source`).
+- `symphonia`: Enables the `symphonia` dependency and decoding APIs (`generate`, `generate_u8`, `generate_from_source`, `generate_channels`, and `generate_channels_from_source`).
 - `all`: Enables the `all` feature on Symphonia.
 
 ## License

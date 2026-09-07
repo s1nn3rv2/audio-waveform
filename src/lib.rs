@@ -8,6 +8,10 @@
 //! output points, how each bucket is summarized ([`Measure::Peak`] or
 //! [`Measure::Rms`]), how multiple channels are handled ([`ChannelMode`]), and
 //! whether the result is normalized.
+//!
+//! Waveforms are `f32` by default. For storing or transmitting them compactly there
+//! are byte-sized equivalents: [`generate_u8`] decodes a file straight into `u8`
+//! points, and [`generate_from_u8_samples`] downsamples `u8` points further.
 #![doc = include_str!("../README.md")]
 
 #[cfg(feature = "symphonia")]
@@ -29,13 +33,13 @@ use symphonia::core::formats::FormatOptions;
 #[cfg(feature = "symphonia")]
 use symphonia::core::formats::probe::Hint;
 #[cfg(feature = "symphonia")]
-use symphonia::core::meta::MetadataOptions;
-#[cfg(feature = "symphonia")]
-use symphonia::core::units::Timestamp;
+use symphonia::core::io::MediaSourceStream;
 #[cfg(feature = "symphonia")]
 pub use symphonia::core::io::{MediaSource, ReadOnlySource};
 #[cfg(feature = "symphonia")]
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+#[cfg(feature = "symphonia")]
+use symphonia::core::units::Timestamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Measure {
@@ -45,7 +49,7 @@ pub enum Measure {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelMode {
-    Mix, //average all channels into one
+    Mix,           //average all channels into one
     Single(usize), //use only this channel, or the last if out of range
 }
 
@@ -65,7 +69,7 @@ pub struct WaveformOptions {
     pub target_len: usize, //num of points
     pub measure: Measure,
     pub channels: ChannelMode, //how channels are reduced to mono
-    pub normalize: bool, //when true, largest point is 1.0
+    pub normalize: bool,       //when true, largest point is 1.0
 }
 
 impl WaveformOptions {
@@ -106,8 +110,35 @@ impl Default for WaveformOptions {
 #[cfg(feature = "symphonia")]
 pub fn generate(path: &Path, options: &WaveformOptions) -> Result<(Vec<f32>, f64), String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
-    let extension_hint = path.extension().map(|e| e.to_string_lossy());
+    let extension_hint = path
+        .extension()
+        .map(|e| e.to_string_lossy());
     generate_from_source(Box::new(file), extension_hint.as_deref(), options)
+}
+
+/// Decodes an audio file at the given path and generates a `u8` waveform.
+///
+/// Identical to [`generate`], except each point is scaled from `0.0..=1.0` onto
+/// `0..=255` (clamped).
+///
+/// Returns both the `u8` waveform points and the calculated duration in seconds.
+///
+/// ```no_run
+/// use audio_waveform::{generate_u8, WaveformOptions};
+/// use std::path::Path;
+///
+/// let (waveform, duration) = generate_u8(Path::new("song.mp3"), &WaveformOptions::new(250))?;
+/// println!("{} points over {duration:.2}s", waveform.len());
+/// # Ok::<(), String>(())
+/// ```
+#[cfg(feature = "symphonia")]
+pub fn generate_u8(path: &Path, options: &WaveformOptions) -> Result<(Vec<u8>, f64), String> {
+    let (waveform, duration) = generate(path, options)?;
+    let u8_points = waveform
+        .into_iter()
+        .map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8)
+        .collect();
+    Ok((u8_points, duration))
 }
 
 /// Decodes audio directly from any source implementing `MediaSource`.
@@ -140,12 +171,14 @@ pub fn generate_from_source(
         .find_map(|t| match t.codec_params {
             Some(CodecParameters::Audio(ref params)) if params.codec != CODEC_ID_NULL_AUDIO => {
                 Some((t.id, params.clone(), t.num_frames, t.time_base, t.duration))
-            }
+            },
             _ => None,
         })
         .ok_or("No audio track found")?;
 
-    let sample_rate = codec_params.sample_rate.unwrap_or(44100) as f64;
+    let sample_rate = codec_params
+        .sample_rate
+        .unwrap_or(44100) as f64;
 
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(&codec_params, &AudioDecoderOptions::default())
@@ -172,7 +205,7 @@ pub fn generate_from_source(
             Ok(decoded) => {
                 total_frames += decoded.frames();
                 append_samples(&decoded, &mut interleaved, &mut mono, options.channels);
-            }
+            },
             // if malformed -> skip this one and keep deforming
             Err(Error::DecodeError(_) | Error::ResetRequired) => continue,
             // stop if IO error
@@ -199,9 +232,14 @@ pub fn generate_from_source(
 /// Returns a vector of waveform points for each audio channel (e.g. `[Left, Right]` for stereo or
 /// `[FL, FR, FC, LFE, RL, RR]` for 5.1 surround sound) in a single pass, along with duration in seconds.
 #[cfg(feature = "symphonia")]
-pub fn generate_channels(path: &Path, options: &WaveformOptions) -> Result<(Vec<Vec<f32>>, f64), String> {
+pub fn generate_channels(
+    path: &Path,
+    options: &WaveformOptions,
+) -> Result<(Vec<Vec<f32>>, f64), String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
-    let extension_hint = path.extension().map(|e| e.to_string_lossy());
+    let extension_hint = path
+        .extension()
+        .map(|e| e.to_string_lossy());
     generate_channels_from_source(Box::new(file), extension_hint.as_deref(), options)
 }
 
@@ -236,12 +274,14 @@ pub fn generate_channels_from_source(
         .find_map(|t| match t.codec_params {
             Some(CodecParameters::Audio(ref params)) if params.codec != CODEC_ID_NULL_AUDIO => {
                 Some((t.id, params.clone(), t.num_frames, t.time_base, t.duration))
-            }
+            },
             _ => None,
         })
         .ok_or("No audio track found")?;
 
-    let sample_rate = codec_params.sample_rate.unwrap_or(44100) as f64;
+    let sample_rate = codec_params
+        .sample_rate
+        .unwrap_or(44100) as f64;
 
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(&codec_params, &AudioDecoderOptions::default())
@@ -267,7 +307,7 @@ pub fn generate_channels_from_source(
             Ok(decoded) => {
                 total_frames += decoded.frames();
                 append_all_channel_samples(&decoded, &mut interleaved, &mut channel_buffers);
-            }
+            },
             Err(Error::DecodeError(_) | Error::ResetRequired) => continue,
             Err(_) => break,
         }
@@ -314,13 +354,13 @@ fn append_samples(
                 let sum: f32 = frame.iter().sum();
                 out.push(sum / count as f32);
             }
-        }
+        },
         ChannelMode::Single(index) => {
             let index = index.min(count - 1);
             for frame in interleaved.chunks_exact(count) {
                 out.push(frame[index]);
             }
-        }
+        },
     }
 }
 
@@ -367,24 +407,103 @@ pub fn generate_from_samples(samples: &[f32], options: &WaveformOptions) -> Vec<
     for i in 0..target_len {
         let start = i * len / target_len;
         // clamp so every bucket has at least one sample
-        let end = ((i + 1) * len / target_len).max(start + 1).min(len);
+        let end = ((i + 1) * len / target_len)
+            .max(start + 1)
+            .min(len);
         let bucket = &samples[start..end];
 
         let value = match options.measure {
-            Measure::Peak => bucket.iter().fold(0.0f32, |max, &s| max.max(s.abs())),
+            Measure::Peak => bucket
+                .iter()
+                .fold(0.0f32, |max, &s| max.max(s.abs())),
             Measure::Rms => {
                 let sum_sq: f32 = bucket.iter().map(|&s| s * s).sum();
                 (sum_sq / bucket.len() as f32).sqrt()
-            }
+            },
         };
         waveform.push(value);
     }
 
     if options.normalize {
-        let max = waveform.iter().copied().fold(0.0f32, f32::max);
+        let max = waveform
+            .iter()
+            .copied()
+            .fold(0.0f32, f32::max);
         if max > 0.0 {
             for point in &mut waveform {
                 *point /= max;
+            }
+        }
+    }
+
+    waveform
+}
+
+/// Downsamples an existing `u8` waveform into a smaller one, for example turning a
+/// stored 1000-point waveform into a 100-point preview without decoding the audio again.
+///
+/// The `u8` counterpart of [`generate_from_samples`]. It takes the points [`generate_u8`]
+/// produces, where `0` is silence and `255` is full amplitude, and produces exactly
+/// `options.target_len` of them. [`ChannelMode`] is ignored, since the input is already
+/// a single waveform.
+///
+/// This is not for raw 8-bit PCM audio, which centres silence on `128` rather than `0`.
+/// Decode that with [`generate_u8`] instead.
+///
+/// ```
+/// use audio_waveform::{generate_from_u8_samples, Measure, WaveformOptions};
+///
+/// let stored = vec![10, 40, 200, 90, 30, 60];
+/// let options = WaveformOptions::new(3)
+///     .measure(Measure::Peak)
+///     .normalize(false);
+///
+/// assert_eq!(generate_from_u8_samples(&stored, &options), vec![40, 200, 60]);
+/// ```
+pub fn generate_from_u8_samples(samples: &[u8], options: &WaveformOptions) -> Vec<u8> {
+    let target_len = options.target_len;
+    if target_len == 0 || samples.is_empty() {
+        return Vec::new();
+    }
+
+    let len = samples.len();
+    let mut waveform = Vec::with_capacity(target_len);
+
+    for i in 0..target_len {
+        let start = i * len / target_len;
+        let end = ((i + 1) * len / target_len)
+            .max(start + 1)
+            .min(len);
+        let bucket = &samples[start..end];
+
+        let value = match options.measure {
+            Measure::Peak => bucket
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0),
+            Measure::Rms => {
+                let sum_sq: u64 = bucket
+                    .iter()
+                    .map(|&s| (s as u64) * (s as u64))
+                    .sum();
+                let mean_sq = sum_sq / bucket.len() as u64;
+                (mean_sq as f64).sqrt().round() as u8
+            },
+        };
+        waveform.push(value);
+    }
+
+    if options.normalize {
+        let max = waveform
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        if max > 0 && max < 255 {
+            let scale = 255.0 / max as f32;
+            for point in &mut waveform {
+                *point = (*point as f32 * scale).round() as u8;
             }
         }
     }
